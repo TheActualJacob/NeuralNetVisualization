@@ -34,6 +34,103 @@ The animation speed adjusts based on layer type. Conv layers are slower so you c
 - Play button starts the animation
 - Click any layer to highlight it
 
+## Architecture
+
+### Overview
+
+The entire application lives in a single `index.html` file (~3,000 lines). There is no build step, no bundler, and no server. All dependencies are loaded from CDN at runtime: React 18, Three.js r128, Babel Standalone (for in-browser JSX transpilation), and protobuf.js 7.2.4.
+
+```
+index.html
+├── <head>  CDN imports + CSS (lines 1–614)
+└── <script type="text/babel">  Entire React app (lines 615–3016)
+    ├── Shared geometry cache
+    ├── OrbitControls class  (custom camera controller)
+    └── NeuralArchitectureExplorer  (root React component)
+        ├── State & refs
+        ├── File handling
+        ├── ONNX parsing
+        ├── Layer visualizers
+        ├── Three.js scene setup
+        ├── Animation loop
+        └── JSX UI
+```
+
+### Data flow
+
+```
+User drops .onnx file
+        │
+        ▼
+handleFile() reads ArrayBuffer
+        │
+        ▼
+parseONNX()  ──success──▶  modelData state (nodes, shapes, params)
+        │ failure
+        ▼
+fallbackParseONNX()  ──────▶  modelData state (nodes inferred from binary)
+        │
+        ▼
+initVisualization()  creates Three.js scene
+        │
+        ├─▶  createConvLayer()           conv / pool layers
+        ├─▶  createLinearLayer()         dense / fully-connected layers
+        ├─▶  createActivationLayer()     ReLU, Sigmoid, etc.
+        ├─▶  createStructuralLayer()     Add, Mul, Concat
+        └─▶  createShapeTransformLayer() Flatten, Reshape, Transpose
+        │
+        ▼
+WebGL render loop  (requestAnimationFrame)
+        │
+        ▼
+animateDataFlow()  highlights active layers, pulses connections
+```
+
+### ONNX parsing
+
+**Primary path — protobuf.js:** `onnx.proto` is loaded from the same origin and used to decode the binary file into a `ModelProto` object. This gives full access to node names, operation types, shapes, kernel sizes, and attributes.
+
+**Fallback path — binary pattern matching:** If protobuf decoding fails, `fallbackParseONNX()` scans the raw bytes for UTF-8 strings that match known ONNX op-type names (`Conv`, `Relu`, `BatchNormalization`, etc.). It applies heuristics to discard false positives and caps output at 300 layers for performance.
+
+### 3D rendering
+
+Three.js is used directly (no abstraction layer). The scene is built once after a model is parsed and reused across animation frames.
+
+| Layer type | 3D representation |
+|---|---|
+| Conv2d / Pool | Triangular prism with stacked feature-map grids and animated kernel planes |
+| Linear (Dense) | Two vertical node columns connected by line segments |
+| Activation | Ring of small spheres |
+| Add / Mul / Concat | Y-shaped merge geometry |
+| Flatten / Reshape | Compressed grid showing shape change |
+
+The custom `OrbitControls` class handles mouse/touch input for rotate, pan, and zoom without relying on the Three.js extras bundle.
+
+### Animation system
+
+`animateDataFlow()` runs every frame via `requestAnimationFrame`. It:
+
+- Advances `animationProgress` (0–100%) at a speed scaled by layer type (Conv layers run slower)
+- Lights up the currently active layer group by raising mesh opacity
+- Pulses connection lines between layers using a travelling colour gradient
+- In **tour mode**, drives the camera through five preset motions (orbital rotation, fly-through, zoom wave, top-down sweep, dolly zoom)
+- In **exploration mode**, moves the camera continuously along a smooth procedural path
+
+### State management
+
+All state lives in the root `NeuralArchitectureExplorer` component via `useState` / `useRef`. There is no external state library.
+
+| State variable | Purpose |
+|---|---|
+| `modelData` | Parsed ONNX graph (nodes, shapes, layer count) |
+| `isPlaying` | Whether the animation loop is running |
+| `animationProgress` | Current playhead position (0–100) |
+| `animationSpeed` | User-controlled speed multiplier |
+| `selectedLayer` | Index of the layer the user clicked |
+| `cameraView` | Active camera preset (default / top / side) |
+| `tourMode` | Guided camera tour while animating |
+| `explorationMode` | Continuous autonomous camera movement |
+
 ## Technical stuff
 
 Uses Three.js for rendering and protobuf.js for parsing ONNX files. The parser tries to decode the protobuf schema first, but if that fails (thanks GitHub Pages CORS issues), there's a fallback that does basic binary pattern matching.
